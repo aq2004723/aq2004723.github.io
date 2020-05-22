@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>金发萌音</title>
+  <icon>https://www.gravatar.com/avatar/c45448b7e068c2f427ca365294ca8ccc</icon>
+  <subtitle>金发萌音</subtitle>
+  <link href="/atom.xml" rel="self"/>
+  
+  <link href="http://blog.hloli.com/"/>
+  <updated>2020-05-22T06:40:51.577Z</updated>
+  <id>http://blog.hloli.com/</id>
+  
+  <author>
+    <name>布</name>
+    <email>bu@hloli.me</email>
+  </author>
+  
+  <generator uri="http://hexo.io/">Hexo</generator>
+  
+  <entry>
+    <title>java full gc 频繁问题排查</title>
+    <link href="http://blog.hloli.com/2020/05/06/%E6%97%A5%E5%BF%97/"/>
+    <id>http://blog.hloli.com/2020/05/06/日志/</id>
+    <published>2020-05-06T09:22:44.000Z</published>
+    <updated>2020-05-22T06:40:51.577Z</updated>
+    
+    <content type="html"><![CDATA[<h1 id="java-full-gc-频繁问题排查"><a href="#java-full-gc-频繁问题排查" class="headerlink" title="java full gc 频繁问题排查"></a>java full gc 频繁问题排查</h1><p>排查full gc问题首先要知道什么情况下会发生full gc</p><blockquote><p>作者：Ted Mosby<br>链接：<a href="https://www.zhihu.com/question/41922036/answer/144566789" target="_blank" rel="noopener">https://www.zhihu.com/question/41922036/answer/144566789</a><br>来源：知乎<br>著作权归作者所有。商业转载请联系作者获得授权，非商业转载请注明出处。  </p><ol><li><p>Full GC定义是相对明确的，就是针对整个新生代、老生代、元空间（metaspace，java8以上版本取代perm gen）的全局范围的GC；  </p></li><li><p>Minor GC和Major GC是俗称，在Hotspot JVM实现的Serial GC, Parallel GC, CMS, G1 GC中大致可以对应到某个Young GC和Old GC算法组合；  </p></li><li><p>最重要是搞明白上述Hotspot JVM实现中几种GC算法组合到底包含了什么。<br>3.1 Serial GC算法：Serial Young GC ＋ Serial Old GC （敲黑板！敲黑板！敲黑板！实际上它是全局范围的Full GC）；<br>3.2 Parallel GC算法：Parallel Young GC ＋ 非并行的PS MarkSweep GC / 并行的Parallel Old GC（敲黑板！敲黑板！敲黑板！这俩实际上也是全局范围的Full GC），选PS MarkSweep GC 还是 Parallel Old GC 由参数UseParallelOldGC来控制；<br>3.3 CMS算法：ParNew（Young）GC + CMS（Old）GC （piggyback on ParNew的结果／老生代存活下来的object只做记录，不做compaction）＋ Full GC for CMS算法（应对核心的CMS GC某些时候的不赶趟，开销很大）；3.4 G1 GC：Young GC + mixed GC（新生代，再加上部分老生代）＋ Full GC for G1 GC算法（应对G1 GC算法某些时候的不赶趟，开销很大）；  </p></li><li><p>搞清楚了上面这些组合，我们再来看看各类GC算法的触发条件。简单说，触发条件就是某GC算法对应区域满了，或是预测快满了。比如，<br>4.1 各种Young GC的触发原因都是eden区满了；<br>4.2 Serial Old GC／PS MarkSweep GC／Parallel Old GC的触发则是在要执行Young GC时候预测其promote的object的总size超过老生代剩余size；<br>4.3 CMS GC的initial marking的触发条件是老生代使用比率超过某值；<br>4.4 G1 GC的initial marking的触发条件是Heap使用比率超过某值，跟4.3 heuristics 类似；<br>4.5 Full GC for CMS算法和Full GC for G1 GC算法的触发原因很明显，就是4.3 和 4.4 的fancy算法不赶趟了，只能全局范围大搞一次GC了（相信我，这很慢！这很慢！这很慢！）；<br>5 题主说的 “Full GC会先触发一次Minor GC” － 指的应该是5.1 （说错了，我删了）<br>5.2 PS MarkSweep GC／Parallel Old GC（Full GC）之前会跑一次Parallel Young GC；原因就是减轻Full GC 的负担。哇～整个picture 是有点乱，希望我整理的还算清楚：）  </p></li></ol></blockquote><p>总结起来，full gc的触发根据回收器的不同有以下几种可能</p><ol><li>老年代空间不足</li><li>Permanet Generation空间满</li><li>CMS GC时出现promotion failed和concurrent mode failure</li><li>Serial Old GC／PS MarkSweep GC／Parallel Old GC的触发则是在要执行Young GC时候预测其promote的object的总size超过老生代剩余size</li></ol><p>对应的表现以及解决方式：</p><h2 id="老年代空间不足"><a href="#老年代空间不足" class="headerlink" title="老年代空间不足"></a>老年代空间不足</h2><p>连续多次触发full gc，old gen 空间占比高，甚至直接抛出<code>java.lang.OutOfMemoryError: Java heap space</code></p><p>解决方案，调整jvm参数，扩大老年代比率，或者直接扩大堆空间</p><h2 id="Permanet-Generation空间满"><a href="#Permanet-Generation空间满" class="headerlink" title="Permanet Generation空间满"></a>Permanet Generation空间满</h2><p>连续多次触发full gc， Permanet Generation空间占比高</p><p>解决方案：扩大Perm 大小</p><h2 id="CMS-GC时出现promotion-failed和concurrent-mode-failure"><a href="#CMS-GC时出现promotion-failed和concurrent-mode-failure" class="headerlink" title="CMS GC时出现promotion failed和concurrent mode failure"></a>CMS GC时出现promotion failed和concurrent mode failure</h2><p>查询gc日志<br>promotion failed是在进行Minor GC时，survivor space放不下、对象只能放入旧生代，而此时旧生代也放不下造成的；concurrent mode failure是在执行CMS GC的过程中同时有对象要放入旧生代，而此时旧生代空间不足造成的。</p><p>解决方案：增大survivor space、old gen 空间</p><h2 id="Serial-Old-GC／PS-MarkSweep-GC／Parallel-Old-GC的触发则是在要执行Young-GC时候预测其promote的object的总size超过老生代剩余size"><a href="#Serial-Old-GC／PS-MarkSweep-GC／Parallel-Old-GC的触发则是在要执行Young-GC时候预测其promote的object的总size超过老生代剩余size" class="headerlink" title="Serial Old GC／PS MarkSweep GC／Parallel Old GC的触发则是在要执行Young GC时候预测其promote的object的总size超过老生代剩余size"></a>Serial Old GC／PS MarkSweep GC／Parallel Old GC的触发则是在要执行Young GC时候预测其promote的object的总size超过老生代剩余size</h2><p>解决方案：增大old gen 空间</p>]]></content>
+    
+    <summary type="html">
+    
+      
+      
+        &lt;h1 id=&quot;java-full-gc-频繁问题排查&quot;&gt;&lt;a href=&quot;#java-full-gc-频繁问题排查&quot; class=&quot;headerlink&quot; title=&quot;java full gc 频繁问题排查&quot;&gt;&lt;/a&gt;java full gc 频繁问题排查&lt;/h1&gt;&lt;p&gt;排查
+      
+    
+    </summary>
+    
+    
+  </entry>
+  
+  <entry>
+    <title>jvm垃圾回收总结</title>
+    <link href="http://blog.hloli.com/2020/05/06/jvm%E5%9E%83%E5%9C%BE%E5%9B%9E%E6%94%B6%E6%80%BB%E7%BB%93/"/>
+    <id>http://blog.hloli.com/2020/05/06/jvm垃圾回收总结/</id>
+    <published>2020-05-06T09:19:15.632Z</published>
+    <updated>2020-05-06T09:19:15.632Z</updated>
+    
+    <content type="html"><![CDATA[<h1 id="jvm垃圾回收总结"><a href="#jvm垃圾回收总结" class="headerlink" title="jvm垃圾回收总结"></a>jvm垃圾回收总结</h1><h2 id="4种垃圾回收算法"><a href="#4种垃圾回收算法" class="headerlink" title="4种垃圾回收算法"></a>4种垃圾回收算法</h2><ol><li>标记-清除</li><li>复制算法</li><li>标记-整理</li><li>分代收集</li></ol><h4 id="标记-清除"><a href="#标记-清除" class="headerlink" title="标记-清除"></a>标记-清除</h4><p>分为两个步骤<br>标记出所有要回收对象：<br>一般使用根节点，所有通过节点不可达的对象将被标记<br>回收所有已标记对象<br>回收被标记对象的内存</p><p>缺点：效率低，产生碎片</p><h4 id="复制算法"><a href="#复制算法" class="headerlink" title="复制算法"></a>复制算法</h4><p>将内存分为两个部分，当一个部分满了后，将所有存活对象连续的复制到另一部分，并且清楚老的部分的全部对象内存</p><p>优点：解决的了标记-清楚算法产生的碎片问题<br>缺点: 只使用了一个一半内存，资源浪费严重，存活对象较多会复制会产生较大开销</p><blockquote><p>为了解决内存浪费的问题<br>将内存区域化为一个Eden区和两个survivor区，每次使用Eden区和一个survivor区<br>过程是一个对eden区和一个survivor区进行垃圾回收 将存活对象复制到另一个survivor区</p></blockquote><h4 id="标记-整理"><a href="#标记-整理" class="headerlink" title="标记-整理"></a>标记-整理</h4><p>标记-整理方法大致和标记清楚算法一致，标记后不清楚，将对象复制到一端，清楚尾端</p><h4 id="分代收集"><a href="#分代收集" class="headerlink" title="分代收集"></a>分代收集</h4><p>现代虚拟机均使用这种方案<br>一般将内存分为两个部分 新生代和老年代</p><p>新生代有大量新对象产生，又会有大量对象被回收，采用复制算法</p><p>老年代对象相对长期存活 使用标记-清除或标记-整理算法</p><h2 id="几种垃圾收集器实现对比"><a href="#几种垃圾收集器实现对比" class="headerlink" title="几种垃圾收集器实现对比"></a>几种垃圾收集器实现对比</h2><p><img src="http://image.hloli.me/18-03-27/1522123699340.jpg" alt="几种垃圾收集器实现"></p><table><thead><tr><th>垃圾回收器</th><th>实现算法</th><th>作用空间</th><th>实现描述</th><th>适用场景</th><th>优点</th><th>缺点</th></tr></thead><tbody><tr><td> Serial</td><td>复制算法</td><td>新生代</td><td>暂停所有用户线程，执行gc线程，默认运行在client模式下</td><td>简单程序、小型客户端程序</td><td>简单、高效，针对单cpu构架有很好的表现</td><td>stop the world，表现为程序卡顿</td></tr><tr><td> ParNew 收集器</td><td>复制算法</td><td>新生代</td><td>Serial收集器的多线程版本</td><td>server模式下首选的模式</td><td>能与CMS收集器一起作用，在多核心情况下相比Serial有较高效率</td><td></td></tr><tr><td> paralled scavenge收集器</td><td>复制算法</td><td>新生代</td><td>更关注吞吐量，即运行中占总时间（运行时间+gc时间）的百分比，可以不指定Eden区和suvivor区比例，系统根据运行情况自动调节</td><td>更关注吞吐量的情况，对CPU资源敏感</td><td></td></tr><tr><td> Serial Old 收集器</td><td>标记-整理</td><td>老年代</td><td>Serial算法的老年代版本</td><td>client模式下默认的老年带收集器，在Server模式下常作为CMS失效的情况下的后备收集算法</td><td></td></tr><tr><td> paralled old 收集器</td><td>多线程的 标记-整理算法</td><td>老年代</td><td>配合 paralled scavenge收集器 完成对cpu资源敏感的收集</td><td>与  paralled scavenge收集器 配合使用</td></tr><tr><td> CMS收集器</td><td>标记清除</td><td>老年代</td><td>目标是停顿时间最短，实现见下面的讨论</td><td>互联网BS构架中常用的服务端收集器</td><td>并发收集、低停顿</td><td>CPU敏感，默认线程数是（CPU数量 + 3 ) / 4,少于4个cpu的情况下有时会显著降低反应速度， 其次，因为浮动垃圾的存在有时会发生 收集失败，从而触发full gc 导致时间变长。使用标记-清除算法，有碎片问题产生，碎片过多也会触发full gc</td></tr><tr><td> g1 收集器</td><td>标记-整理 加 复制</td><td>全堆空间</td><td>详细见下面</td><td>用于在BS构架中替代CMS</td></tr></tbody></table><h4 id="CMS-垃圾收集器简述"><a href="#CMS-垃圾收集器简述" class="headerlink" title="CMS 垃圾收集器简述"></a>CMS 垃圾收集器简述</h4><p>分为四个阶段</p><ul><li>初始标记   标记根对象</li><li>并发标记   标记可达对象</li><li>重新标记   标记产生变动的对象</li><li>并发清除   编发清除</li></ul><p>过程如下图<br><img src="http://image.hloli.me/18-03-27/1522139736358.jpg" alt="img"><br>前三个阶段会触发停顿</p><h4 id="G1-垃圾收集器简述"><a href="#G1-垃圾收集器简述" class="headerlink" title="G1 垃圾收集器简述"></a>G1 垃圾收集器简述</h4><p>暂无</p><h2 id="垃圾收集器参数总结"><a href="#垃圾收集器参数总结" class="headerlink" title="垃圾收集器参数总结"></a>垃圾收集器参数总结</h2><p> <img src="http://image.hloli.me/18-03-27/1522139358525.jpg" alt="img"></p><h2 id="选用问题"><a href="#选用问题" class="headerlink" title="选用问题"></a>选用问题</h2><p>使用spring进行开发时一般根据cpu核心数来进行选择（如无特殊需求）<br>大于等于4核心 使用CMS + ParNew 收集器<br>小于4核心    使用  Serial Old  + ParNew 收集器</p><p>g1收集器目前还没有使用过，不做评价，但是越来越多的项目使用G1收集器  值得考虑</p>]]></content>
+    
+    <summary type="html">
+    
+      
+      
+        &lt;h1 id=&quot;jvm垃圾回收总结&quot;&gt;&lt;a href=&quot;#jvm垃圾回收总结&quot; class=&quot;headerlink&quot; title=&quot;jvm垃圾回收总结&quot;&gt;&lt;/a&gt;jvm垃圾回收总结&lt;/h1&gt;&lt;h2 id=&quot;4种垃圾回收算法&quot;&gt;&lt;a href=&quot;#4种垃圾回收算法&quot; class=&quot;
+      
+    
+    </summary>
+    
+    
+  </entry>
+  
+  <entry>
+    <title>java full gc 频繁问题排查</title>
+    <link href="http://blog.hloli.com/2020/05/06/java%20full%20gc%20%E9%A2%91%E7%B9%81%E9%97%AE%E9%A2%98%E6%8E%92%E6%9F%A5/"/>
+    <id>http://blog.hloli.com/2020/05/06/java full gc 频繁问题排查/</id>
+    <published>2020-05-06T09:19:15.631Z</published>
+    <updated>2020-05-06T09:19:15.632Z</updated>
+    
+    <content type="html"><![CDATA[<h1 id="java-full-gc-频繁问题排查"><a href="#java-full-gc-频繁问题排查" class="headerlink" title="java full gc 频繁问题排查"></a>java full gc 频繁问题排查</h1><p>排查full gc问题首先要知道什么情况下会发生full gc</p><blockquote><p>作者：Ted Mosby<br>链接：<a href="https://www.zhihu.com/question/41922036/answer/144566789" target="_blank" rel="noopener">https://www.zhihu.com/question/41922036/answer/144566789</a><br>来源：知乎<br>著作权归作者所有。商业转载请联系作者获得授权，非商业转载请注明出处。  </p><ol><li><p>Full GC定义是相对明确的，就是针对整个新生代、老生代、元空间（metaspace，java8以上版本取代perm gen）的全局范围的GC；  </p></li><li><p>Minor GC和Major GC是俗称，在Hotspot JVM实现的Serial GC, Parallel GC, CMS, G1 GC中大致可以对应到某个Young GC和Old GC算法组合；  </p></li><li><p>最重要是搞明白上述Hotspot JVM实现中几种GC算法组合到底包含了什么。<br>3.1 Serial GC算法：Serial Young GC ＋ Serial Old GC （敲黑板！敲黑板！敲黑板！实际上它是全局范围的Full GC）；<br>3.2 Parallel GC算法：Parallel Young GC ＋ 非并行的PS MarkSweep GC / 并行的Parallel Old GC（敲黑板！敲黑板！敲黑板！这俩实际上也是全局范围的Full GC），选PS MarkSweep GC 还是 Parallel Old GC 由参数UseParallelOldGC来控制；<br>3.3 CMS算法：ParNew（Young）GC + CMS（Old）GC （piggyback on ParNew的结果／老生代存活下来的object只做记录，不做compaction）＋ Full GC for CMS算法（应对核心的CMS GC某些时候的不赶趟，开销很大）；3.4 G1 GC：Young GC + mixed GC（新生代，再加上部分老生代）＋ Full GC for G1 GC算法（应对G1 GC算法某些时候的不赶趟，开销很大）；  </p></li><li><p>搞清楚了上面这些组合，我们再来看看各类GC算法的触发条件。简单说，触发条件就是某GC算法对应区域满了，或是预测快满了。比如，<br>4.1 各种Young GC的触发原因都是eden区满了；<br>4.2 Serial Old GC／PS MarkSweep GC／Parallel Old GC的触发则是在要执行Young GC时候预测其promote的object的总size超过老生代剩余size；<br>4.3 CMS GC的initial marking的触发条件是老生代使用比率超过某值；<br>4.4 G1 GC的initial marking的触发条件是Heap使用比率超过某值，跟4.3 heuristics 类似；<br>4.5 Full GC for CMS算法和Full GC for G1 GC算法的触发原因很明显，就是4.3 和 4.4 的fancy算法不赶趟了，只能全局范围大搞一次GC了（相信我，这很慢！这很慢！这很慢！）；<br>5 题主说的 “Full GC会先触发一次Minor GC” － 指的应该是5.1 （说错了，我删了）<br>5.2 PS MarkSweep GC／Parallel Old GC（Full GC）之前会跑一次Parallel Young GC；原因就是减轻Full GC 的负担。哇～整个picture 是有点乱，希望我整理的还算清楚：）  </p></li></ol></blockquote><p>总结起来，full gc的触发根据回收器的不同有以下几种可能</p><ol><li>老年代空间不足</li><li>Permanet Generation空间满</li><li>CMS GC时出现promotion failed和concurrent mode failure</li><li>Serial Old GC／PS MarkSweep GC／Parallel Old GC的触发则是在要执行Young GC时候预测其promote的object的总size超过老生代剩余size</li></ol><p>对应的表现以及解决方式：</p><h2 id="老年代空间不足"><a href="#老年代空间不足" class="headerlink" title="老年代空间不足"></a>老年代空间不足</h2><p>连续多次触发full gc，old gen 空间占比高，甚至直接抛出<code>java.lang.OutOfMemoryError: Java heap space</code></p><p>解决方案，调整jvm参数，扩大老年代比率，或者直接扩大堆空间</p><h2 id="Permanet-Generation空间满"><a href="#Permanet-Generation空间满" class="headerlink" title="Permanet Generation空间满"></a>Permanet Generation空间满</h2><p>连续多次触发full gc， Permanet Generation空间占比高</p><p>解决方案：扩大Perm 大小</p><h2 id="CMS-GC时出现promotion-failed和concurrent-mode-failure"><a href="#CMS-GC时出现promotion-failed和concurrent-mode-failure" class="headerlink" title="CMS GC时出现promotion failed和concurrent mode failure"></a>CMS GC时出现promotion failed和concurrent mode failure</h2><p>查询gc日志<br>promotion failed是在进行Minor GC时，survivor space放不下、对象只能放入旧生代，而此时旧生代也放不下造成的；concurrent mode failure是在执行CMS GC的过程中同时有对象要放入旧生代，而此时旧生代空间不足造成的。</p><p>解决方案：增大survivor space、old gen 空间</p><h2 id="Serial-Old-GC／PS-MarkSweep-GC／Parallel-Old-GC的触发则是在要执行Young-GC时候预测其promote的object的总size超过老生代剩余size"><a href="#Serial-Old-GC／PS-MarkSweep-GC／Parallel-Old-GC的触发则是在要执行Young-GC时候预测其promote的object的总size超过老生代剩余size" class="headerlink" title="Serial Old GC／PS MarkSweep GC／Parallel Old GC的触发则是在要执行Young GC时候预测其promote的object的总size超过老生代剩余size"></a>Serial Old GC／PS MarkSweep GC／Parallel Old GC的触发则是在要执行Young GC时候预测其promote的object的总size超过老生代剩余size</h2><p>解决方案：增大old gen 空间</p>]]></content>
+    
+    <summary type="html">
+    
+      
+      
+        &lt;h1 id=&quot;java-full-gc-频繁问题排查&quot;&gt;&lt;a href=&quot;#java-full-gc-频繁问题排查&quot; class=&quot;headerlink&quot; title=&quot;java full gc 频繁问题排查&quot;&gt;&lt;/a&gt;java full gc 频繁问题排查&lt;/h1&gt;&lt;p&gt;排查
+      
+    
+    </summary>
+    
+    
+  </entry>
+  
+</feed>
